@@ -476,6 +476,198 @@ func TestManagerHTTP(t *testing.T) {
 			})
 		})
 	})
+
+	// This could be obviously be improved by table driven test, but because of time constraints I am creating a test for each case
+	t.Run("suite=flagSession", func(t *testing.T) {
+
+		t.Run("case= risk high for no ip address set", func(t *testing.T) {
+			ctx := context.Background()
+			req := testhelpers.NewTestHTTPRequest(t, "GET", "/sessions/whoami", nil)
+			req.Header["User-Agent"] = []string{"Mozilla/5.0 (X11; Linux x86_64)", "AppleWebKit/537.36 (KHTML, like Gecko)", "Chrome/51.0.2704.103 Safari/537.36"}
+			conf, reg := internal.NewFastRegistryWithMocks(t)
+			testhelpers.SetDefaultIdentitySchema(conf, "file://./stub/identity.schema.json")
+			ctx = testhelpers.WithDefaultIdentitySchema(ctx, "file://./stub/identity.schema.json")
+			i := identity.Identity{Traits: []byte("{}")}
+			require.NoError(t, reg.PrivilegedIdentityPool().CreateIdentity(context.Background(), &i))
+			highRiskFlaggedSession, _ := testhelpers.NewActiveSession(req, reg, &i, time.Now(), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+			reg.SessionManager().ActivateSession(req, highRiskFlaggedSession, &i, time.Now())
+			require.Equal(t, highRiskFlaggedSession.ImpossibleTravelRiskLevel, session.ImpossibleTravelRiskLevelHigh)
+		})
+
+		t.Run("case= risk high for no user agent set", func(t *testing.T) {
+			ctx := context.Background()
+			req := testhelpers.NewTestHTTPRequest(t, "GET", "/sessions/whoami", nil)
+			req.Header.Set("True-Client-IP", "54.155.246.155")
+			req.Header.Set("X-Forwarded-For", "217.73.188.139,162.158.203.149, 172.19.2.7")
+			req.Header.Set("Latitude", "52.518589")
+			req.Header.Set("Longitude", "13.376665")
+			conf, reg := internal.NewFastRegistryWithMocks(t)
+			testhelpers.SetDefaultIdentitySchema(conf, "file://./stub/identity.schema.json")
+			ctx = testhelpers.WithDefaultIdentitySchema(ctx, "file://./stub/identity.schema.json")
+			i := identity.Identity{Traits: []byte("{}")}
+			require.NoError(t, reg.PrivilegedIdentityPool().CreateIdentity(context.Background(), &i))
+			s, _ := testhelpers.NewActiveSession(req, reg, &i, time.Now(), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+			reg.SessionManager().ActivateSession(req, s, &i, time.Now())
+			require.Equal(t, s.ImpossibleTravelRiskLevel, session.ImpossibleTravelRiskLevelHigh)
+		})
+
+		t.Run("case= risk high for no location set", func(t *testing.T) {
+			ctx := context.Background()
+			req := testhelpers.NewTestHTTPRequest(t, "GET", "/sessions/whoami", nil)
+			req.Header.Set("True-Client-IP", "54.155.246.155")
+			req.Header.Set("X-Forwarded-For", "217.73.188.139,162.158.203.149, 172.19.2.7")
+			conf, reg := internal.NewFastRegistryWithMocks(t)
+			testhelpers.SetDefaultIdentitySchema(conf, "file://./stub/identity.schema.json")
+			ctx = testhelpers.WithDefaultIdentitySchema(ctx, "file://./stub/identity.schema.json")
+			i := identity.Identity{Traits: []byte("{}")}
+			require.NoError(t, reg.PrivilegedIdentityPool().CreateIdentity(context.Background(), &i))
+			s, _ := testhelpers.NewActiveSession(req, reg, &i, time.Now(), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+			require.Equal(t, s.ImpossibleTravelRiskLevel, session.ImpossibleTravelRiskLevelHigh)
+		})
+
+		// Testcase for logging in from same location within one-hour difference having none risk
+		t.Run("case= none risk for same location", func(t *testing.T) {
+			ctx := context.Background()
+
+			req := testhelpers.NewTestHTTPRequest(t, "GET", "/sessions/whoami", nil)
+			req.Header["User-Agent"] = []string{"Mozilla/5.0 (X11; Linux x86_64)", "AppleWebKit/537.36 (KHTML, like Gecko)", "Chrome/51.0.2704.103 Safari/537.36"}
+			req.Header.Set("True-Client-IP", "54.155.246.155")
+			req.Header.Set("X-Forwarded-For", "217.73.188.139,162.158.203.149, 172.19.2.7")
+			req.Header.Set("Latitude", "52.518589")
+			req.Header.Set("Longitude", "13.376665")
+
+			conf, reg := internal.NewFastRegistryWithMocks(t)
+			testhelpers.SetDefaultIdentitySchema(conf, "file://./stub/identity.schema.json")
+			ctx = testhelpers.WithDefaultIdentitySchema(ctx, "file://./stub/identity.schema.json")
+
+			i := identity.Identity{Traits: []byte("{}")}
+			require.NoError(t, reg.PrivilegedIdentityPool().CreateIdentity(context.Background(), &i))
+
+			// NEW ACTIVE AND THEN UPSERT
+			oldActiveSession, _ := testhelpers.NewActiveSession(req, reg, &i, time.Now().Add(-1*time.Hour), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+			err := reg.SessionPersister().UpsertSession(ctx, oldActiveSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			newSession, _ := testhelpers.NewActiveSession(req, reg, &i, time.Now(), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+			require.Equal(t, newSession.ImpossibleTravelRiskLevel, session.ImpossibleTravelRiskLevelNone)
+
+		})
+
+		// Testcase for impossible travel from Berlin to Washington DC within 1 hour
+		t.Run("case= high risk for teleporting from Berlin To Washington", func(t *testing.T) {
+			ctx := context.Background()
+
+			req1 := testhelpers.NewTestHTTPRequest(t, "GET", "/sessions/whoami", nil)
+			req1.Header["User-Agent"] = []string{"Mozilla/5.0 (X11; Linux x86_64)", "AppleWebKit/537.36 (KHTML, like Gecko)", "Chrome/51.0.2704.103 Safari/537.36"}
+			req1.Header.Set("True-Client-IP", "54.155.246.155")
+			req1.Header.Set("X-Forwarded-For", "217.73.188.139,162.158.203.149, 172.19.2.7")
+			// Bundestag in Berlin
+			req1.Header.Set("Latitude", "52.518589")
+			req1.Header.Set("Longitude", "13.376665")
+
+			conf, reg := internal.NewFastRegistryWithMocks(t)
+			testhelpers.SetDefaultIdentitySchema(conf, "file://./stub/identity.schema.json")
+			ctx = testhelpers.WithDefaultIdentitySchema(ctx, "file://./stub/identity.schema.json")
+
+			i := identity.Identity{Traits: []byte("{}")}
+			require.NoError(t, reg.PrivilegedIdentityPool().CreateIdentity(context.Background(), &i))
+
+			// NEW ACTIVE AND THEN UPSERT
+			oldActiveSession, _ := testhelpers.NewActiveSession(req1, reg, &i, time.Now().Add(-1*time.Hour), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+			err := reg.SessionPersister().UpsertSession(ctx, oldActiveSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req2 := testhelpers.NewTestHTTPRequest(t, "GET", "/sessions/whoami", nil)
+			req2.Header["User-Agent"] = []string{"Mozilla/5.0 (X11; Linux x86_64)", "AppleWebKit/537.36 (KHTML, like Gecko)", "Chrome/51.0.2704.103 Safari/537.36"}
+			req2.Header.Set("True-Client-IP", "54.155.246.155")
+			req2.Header.Set("X-Forwarded-For", "217.73.188.139,162.158.203.149, 172.19.2.7")
+			// White Housem in Washington DC
+			req2.Header.Set("Latitude", "38.8977")
+			req2.Header.Set("Longitude", "-77.036560")
+			newSession, _ := testhelpers.NewActiveSession(req2, reg, &i, time.Now(), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+			require.Equal(t, newSession.ImpossibleTravelRiskLevel, session.ImpossibleTravelRiskLevelHigh)
+
+		})
+
+		// This test case is for none risk when traveling from Berlin to Munich
+		t.Run("case= none risk for travel from Berlin to Munich", func(t *testing.T) {
+			ctx := context.Background()
+
+			req1 := testhelpers.NewTestHTTPRequest(t, "GET", "/sessions/whoami", nil)
+			req1.Header["User-Agent"] = []string{"Mozilla/5.0 (X11; Linux x86_64)", "AppleWebKit/537.36 (KHTML, like Gecko)", "Chrome/51.0.2704.103 Safari/537.36"}
+			req1.Header.Set("True-Client-IP", "54.155.246.155")
+			req1.Header.Set("X-Forwarded-For", "217.73.188.139,162.158.203.149, 172.19.2.7")
+			// Bundestag in Berlin
+			req1.Header.Set("Latitude", "52.518589")
+			req1.Header.Set("Longitude", "13.376665")
+
+			conf, reg := internal.NewFastRegistryWithMocks(t)
+			testhelpers.SetDefaultIdentitySchema(conf, "file://./stub/identity.schema.json")
+			ctx = testhelpers.WithDefaultIdentitySchema(ctx, "file://./stub/identity.schema.json")
+
+			i := identity.Identity{Traits: []byte("{}")}
+			require.NoError(t, reg.PrivilegedIdentityPool().CreateIdentity(context.Background(), &i))
+
+			// NEW ACTIVE AND THEN UPSERT
+			oldActiveSession, _ := testhelpers.NewActiveSession(req1, reg, &i, time.Now().Add(-1*time.Hour), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+			err := reg.SessionPersister().UpsertSession(ctx, oldActiveSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req2 := testhelpers.NewTestHTTPRequest(t, "GET", "/sessions/whoami", nil)
+			req2.Header["User-Agent"] = []string{"Mozilla/5.0 (X11; Linux x86_64)", "AppleWebKit/537.36 (KHTML, like Gecko)", "Chrome/51.0.2704.103 Safari/537.36"}
+			req2.Header.Set("True-Client-IP", "98.137371")
+			req2.Header.Set("X-Forwarded-For", "217.73.188.139,162.158.203.149, 172.19.2.7")
+			// Marienplatz in Munich
+			req2.Header.Set("Latitude", "48.1351")
+			req2.Header.Set("Longitude", "11.5820")
+			newSession, _ := testhelpers.NewActiveSession(req2, reg, &i, time.Now(), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+			require.Equal(t, newSession.ImpossibleTravelRiskLevel, session.ImpossibleTravelRiskLevelNone)
+
+		})
+
+		// This is the test case is to see if the time from last inactive session is within acceptable time slot
+		t.Run("case= logging in month later from Antarctica", func(t *testing.T) {
+			ctx := context.Background()
+
+			req1 := testhelpers.NewTestHTTPRequest(t, "GET", "/sessions/whoami", nil)
+			req1.Header["User-Agent"] = []string{"Mozilla/5.0 (X11; Linux x86_64)", "AppleWebKit/537.36 (KHTML, like Gecko)", "Chrome/51.0.2704.103 Safari/537.36"}
+			req1.Header.Set("True-Client-IP", "54.155.246.155")
+			req1.Header.Set("X-Forwarded-For", "217.73.188.139,162.158.203.149, 172.19.2.7")
+			// Bundestag in Berlin
+			req1.Header.Set("Latitude", "52.518589")
+			req1.Header.Set("Longitude", "13.376665")
+
+			conf, reg := internal.NewFastRegistryWithMocks(t)
+			testhelpers.SetDefaultIdentitySchema(conf, "file://./stub/identity.schema.json")
+			ctx = testhelpers.WithDefaultIdentitySchema(ctx, "file://./stub/identity.schema.json")
+
+			i := identity.Identity{Traits: []byte("{}")}
+			require.NoError(t, reg.PrivilegedIdentityPool().CreateIdentity(context.Background(), &i))
+
+			oldActiveSession, _ := testhelpers.NewInActiveSession(req1, reg, &i, time.Now().AddDate(0, -1, 0), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+			err := reg.SessionPersister().UpsertSession(ctx, oldActiveSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req2 := testhelpers.NewTestHTTPRequest(t, "GET", "/sessions/whoami", nil)
+			req2.Header["User-Agent"] = []string{"Mozilla/5.0 (X11; Linux x86_64)", "AppleWebKit/537.36 (KHTML, like Gecko)", "Chrome/51.0.2704.103 Safari/537.36"}
+			req2.Header.Set("True-Client-IP", "82.8628")
+			req2.Header.Set("X-Forwarded-For", "217.73.188.139,162.158.203.149, 172.19.2.7")
+			// Somewhere in Southpole
+			req2.Header.Set("Latitude", "82.8628")
+			req2.Header.Set("Longitude", "135.0000")
+			newSession, _ := testhelpers.NewActiveSession(req2, reg, &i, time.Now(), identity.CredentialsTypePassword, identity.AuthenticatorAssuranceLevel1)
+			require.Equal(t, newSession.ImpossibleTravelRiskLevel, session.ImpossibleTravelRiskLevelNone)
+
+		})
+	})
 }
 
 func TestDoesSessionSatisfy(t *testing.T) {

@@ -100,7 +100,10 @@ require (
 	google.golang.org/grpc v1.65.0
 )
 
-require github.com/wI2L/jsondiff v0.6.0
+require (
+	github.com/umahmood/haversine v0.0.0-20151105152445-808ab04add26
+	github.com/wI2L/jsondiff v0.6.0
+)
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
