@@ -7,11 +7,15 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/umahmood/haversine"
 
 	"github.com/ory/kratos/x/events"
 
@@ -463,4 +467,71 @@ func (s *ManagerHTTP) ActivateSession(r *http.Request, session *Session, i *iden
 	)
 
 	return nil
+}
+
+func loginFromSameLocation(newDevice, oldDevice Device) bool {
+	if newDevice.ID == oldDevice.ID {
+		return true
+	}
+
+	if newDevice.Location == nil || oldDevice.Location == nil {
+		return false
+	}
+	coord1 := strings.Split(*newDevice.Location, ",")
+	latitude1 := coord1[0]
+	longitude1 := coord1[1]
+	coord2 := strings.Split(*oldDevice.Location, ",")
+	latitude2 := coord2[0]
+	longitude2 := coord2[1]
+	if latitude1 == latitude2 && longitude1 == longitude2 {
+		return true
+	}
+	return false
+}
+
+func didUserTeleport(permissibleSpeed float64, newLoc *string, newT time.Time, oldLoc *string, oldT time.Time) (bool, error) {
+
+	oldCoordinates := strings.Split(*oldLoc, ",")
+	latitude1, longitude1 := oldCoordinates[0], oldCoordinates[1]
+
+	parsedLat1, err := strconv.ParseFloat(latitude1, 64)
+	if err != nil {
+		return false, err
+	}
+	parsedLong1, err := strconv.ParseFloat(longitude1, 64)
+	if err != nil {
+		return false, err
+	}
+	oldCoord := haversine.Coord{
+		Lat: parsedLat1,
+		Lon: parsedLong1,
+	}
+
+	newCoordinates := strings.Split(*newLoc, ",")
+	latitude2, longitude2 := newCoordinates[0], newCoordinates[1]
+	parsedLat2, err := strconv.ParseFloat(latitude2, 64)
+	if err != nil {
+		return false, err
+	}
+	parsedLong2, err := strconv.ParseFloat(longitude2, 64)
+	if err != nil {
+		return false, err
+	}
+	newCoord := haversine.Coord{
+		Lat: parsedLat2,
+		Lon: parsedLong2,
+	}
+
+	_, distance := haversine.Distance(oldCoord, newCoord)
+	timeTaken := newT.Sub(oldT).Hours()
+	if timeTaken < 1.0 {
+		return false, errors.New("time taken too short")
+	}
+	speedInKm := distance / timeTaken
+
+	if permissibleSpeed < speedInKm {
+		return true, nil
+	}
+
+	return false, nil
 }
