@@ -631,6 +631,10 @@ func TestSession(t *testing.T) {
 	assert.Equal(t, false, p.SessionWhoAmICaching(ctx))
 	p.MustSet(ctx, config.ViperKeySessionWhoAmICaching, true)
 	assert.Equal(t, true, p.SessionWhoAmICaching(ctx))
+
+	assert.Equal(t, 900.0, p.SessionMaxTravelSpeed(ctx))
+	p.MustSet(ctx, config.ViperKeySessionAllowedMaxTravelSpeed, "900.0")
+	assert.Equal(t, 900.0, p.SessionMaxTravelSpeed(ctx))
 }
 
 func TestCookies(t *testing.T) {

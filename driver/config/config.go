@@ -108,6 +108,9 @@ const (
 	ViperKeyAdminTLSCertPath                                 = "serve.admin.tls.cert.path"
 	ViperKeyAdminTLSKeyPath                                  = "serve.admin.tls.key.path"
 	ViperKeySessionLifespan                                  = "session.lifespan"
+	ViperKeySessionAllowedMaxTravelSpeed                     = "session.allowed_travel_speed"
+	ViperKeySessionHistoryLookBackThreshold                  = "session.history_look_back_threshold"
+	ViperKeySessionTimeWindowWithNoCheck                     = "session.time_window_with_no_check"
 	ViperKeySessionSameSite                                  = "session.cookie.same_site"
 	ViperKeySessionDomain                                    = "session.cookie.domain"
 	ViperKeySessionName                                      = "session.cookie.name"
@@ -1388,6 +1391,19 @@ func (p *Config) SessionWhoAmIAAL(ctx context.Context) string {
 
 func (p *Config) SessionWhoAmICaching(ctx context.Context) bool {
 	return p.GetProvider(ctx).Bool(ViperKeySessionWhoAmICaching)
+}
+
+// Task: I was a bit hesitant on whether to define the speed as float or as an integer, but for higher precision, I choose float
+func (p *Config) SessionMaxTravelSpeed(ctx context.Context) float64 {
+	return p.GetProvider(ctx).Float64F(ViperKeySessionAllowedMaxTravelSpeed, 900.0)
+}
+
+func (p *Config) SessionHistoryLookBackThreshold(ctx context.Context) int {
+	return p.GetProvider(ctx).IntF(ViperKeySessionHistoryLookBackThreshold, 50)
+}
+
+func (p *Config) SessionTimeWindowWithNoCheck(ctx context.Context) time.Duration {
+	return p.GetProvider(ctx).DurationF(ViperKeySessionTimeWindowWithNoCheck, time.Hour*24*7)
 }
 
 func (p *Config) FeatureFlagFasterSessionExtend(ctx context.Context) bool {
