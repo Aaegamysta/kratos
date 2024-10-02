@@ -23,6 +23,7 @@ import (
 	"github.com/ory/kratos/selfservice/sessiontokenexchange"
 	"github.com/ory/kratos/ui/node"
 	"github.com/ory/x/otelx"
+	"github.com/ory/x/pointerx"
 
 	"github.com/ory/x/randx"
 
@@ -462,10 +463,125 @@ func (s *ManagerHTTP) ActivateSession(r *http.Request, session *Session, i *iden
 	session.SetSessionDeviceInformation(r.WithContext(ctx))
 	session.SetAuthenticatorAssuranceLevel()
 
+	err = s.flagSession(r, session, i, authenticatedAt)
+
 	span.SetAttributes(
 		attribute.String("identity.available_aal", session.Identity.InternalAvailableAAL.String),
 	)
 
+	return nil
+}
+
+// This is the function where the impossible travel attack is detected and where the algorithm lies.
+// One main objective was to try to improve the speed of the algorithm and to make it more efficient.
+// This is done via what is knon as short circuiting, which is a technique that allows the algorithm to
+// skip unnecessary steps and to return the result as soon as possible given some conditions.
+// The function depends on three configurable constants:
+// 1. PermissibleTravelSpeed: This is the maximum speed that a user can travel between two locations
+// 2. LookBackHistory: This is the number of old inactive sessions that the algorithm will check
+// 3. LoginWindowWithoutCheck: This is the time window within which the algorithm will not check for impossible travel
+func (s *ManagerHTTP) flagSession(r *http.Request, newSession *Session, i *identity.Identity, authenticatedAt time.Time) error {
+	permissibleTravelSpeed := s.r.Config().SessionMaxTravelSpeed(r.Context())
+	lookBackHistory := s.r.Config().SessionHistoryLookBackThreshold(r.Context())
+	loginWindowWithoutCheck := s.r.Config().SessionTimeWindowWithNoCheck(r.Context())
+
+	lastActive := pointerx.Bool(true) 
+	// Do check on the new session missing attributes,
+	// checking for the lack of location should be separate, if it is not present it should be high
+	// Validation also spares us from checking nility in the next steps
+	err := newSession.ValidateForImpossibleTravel()
+	if errors.Is(err, ErrIpNotSet) || errors.Is(err, ErrLocationNotSet) || errors.Is(err, ErrUserAgentNotSet) {
+		newSession.SetImpossibleTravelRiskLevel(ImpossibleTravelRiskLevelHigh)
+		return nil
+	}
+
+	// Now that we have validated the new session, we can check if the user has an active session
+	candidateLastSession, _, err := s.r.SessionPersister().ListSessionsByIdentity(r.Context(), i.ID, lastActive, 1, 1, uuid.Nil, ExpandDevices)
+	// I choose to return the error and not continue with the authentication if there is a problem with fetching the sessions, maybe there should be a better error handling
+	if err != nil {
+		return err
+	}
+	// To spare performance penalty, we will first make sure the LAST newSession's devices are in the same location
+	// as this current location
+	// if the user has an active newSession, analyse all other
+	// short circuit path if appropriate by marking the risk as none if they are from the same location
+	if len(candidateLastSession) != 0 {
+		lastSession := candidateLastSession[0]
+		lastDevice := lastSession.LastRegisteredDevice()
+		newDevice := newSession.LastRegisteredDevice()
+		// First short circuit to improve performance if they are from same country
+		if loginFromSameLocation(lastDevice, newDevice) {
+			newSession.ImpossibleTravelRiskLevel = ImpossibleTravelRiskLevelNone
+			return nil
+		}
+		// A possible thing that could have been added is the checking of the IP address range not available
+		// because we need an accurate CIDR detection and we need geolocation API
+		didUserTeleport, err := didUserTeleport(
+			permissibleTravelSpeed,
+			newDevice.Location,
+			newSession.AuthenticatedAt,
+			lastDevice.Location,
+			lastSession.AuthenticatedAt,
+		)
+		if err != nil {
+			return err
+		}
+		if didUserTeleport {
+			newSession.SetImpossibleTravelRiskLevel(ImpossibleTravelRiskLevelHigh)
+			return nil
+		}
+	}
+
+	// No active session
+	// Another shortcircuit path would be if there to check if the user logged in from the LAST inactive session
+	// place to save calculation time WITHIN PERMISSBLE TIME WINDOW
+	notActive := pointerx.Bool(false)
+	lastInActive, _, err := s.r.SessionPersister().ListSessionsByIdentity(r.Context(), i.ID, notActive, 1, 1, uuid.Nil, ExpandDevices)
+	if len(lastInActive) == 0 {
+		// this means that the user has logged recently
+		newSession.SetImpossibleTravelRiskLevel(ImpossibleTravelRiskLevelNone)
+		return nil
+	}
+	lastInActiveSession := lastInActive[0]
+	if loginWindowWithoutCheck < newSession.IssuedAt.Sub(lastInActiveSession.IssuedAt) {
+		newSession.SetImpossibleTravelRiskLevel(ImpossibleTravelRiskLevelNone)
+		return nil
+	}
+
+	// No active session and it is from a different place, then check for the last N old inactive sessions
+	// Important: now this configurable lookBackHistory can be tuned by benchmarking tests to find the optimal value
+	lastInActiveSessions, _, err := s.r.SessionPersister().ListSessionsByIdentity(r.Context(), i.ID, notActive, 1, lookBackHistory, uuid.Nil, ExpandDevices)
+
+	// Another possible optimization is the filtering of these inactive sessions are in the far past i.e. they are too old
+	// Filter out the old sessions that are too old and lie outside of acceptable time window
+	var sessionWithinTimeRange = make([]Session, 0, len(lastInActiveSessions))
+	for _, s := range lastInActiveSessions {
+		if loginWindowWithoutCheck < newSession.IssuedAt.Sub(lastInActiveSession.IssuedAt) {
+			continue
+		}
+		sessionWithinTimeRange = append(sessionWithinTimeRange, s)
+	}
+
+	// Check for each recent old inactive session if the user teleported
+	for _, s := range sessionWithinTimeRange {
+		didUserTele, err := didUserTeleport(
+			permissibleTravelSpeed,
+			lastInActiveSession.LastRegisteredDevice().Location,
+			newSession.AuthenticatedAt,
+			s.LastRegisteredDevice().Location,
+			s.AuthenticatedAt,
+		)
+		if err != nil {
+			return err
+		}
+		if didUserTele {
+			newSession.SetImpossibleTravelRiskLevel(ImpossibleTravelRiskLevelHigh)
+			return nil
+		}
+	}
+
+	// Passed all checks, mark as safe
+	newSession.SetImpossibleTravelRiskLevel(ImpossibleTravelRiskLevelNone)
 	return nil
 }
 
@@ -489,9 +605,13 @@ func loginFromSameLocation(newDevice, oldDevice Device) bool {
 	return false
 }
 
+// Now a possibe improvement is to provide a medium speed that might be suspicious but still acceptable and will not be flagged as high but rather medium
 func didUserTeleport(permissibleSpeed float64, newLoc *string, newT time.Time, oldLoc *string, oldT time.Time) (bool, error) {
 
 	oldCoordinates := strings.Split(*oldLoc, ",")
+	if len(oldCoordinates) != 2 {
+		return false, errors.New("invalid coordinates")
+	}
 	latitude1, longitude1 := oldCoordinates[0], oldCoordinates[1]
 
 	parsedLat1, err := strconv.ParseFloat(latitude1, 64)
@@ -508,6 +628,9 @@ func didUserTeleport(permissibleSpeed float64, newLoc *string, newT time.Time, o
 	}
 
 	newCoordinates := strings.Split(*newLoc, ",")
+	if len(newCoordinates) != 2 {
+		return false, errors.New("invalid coordinates")
+	}
 	latitude2, longitude2 := newCoordinates[0], newCoordinates[1]
 	parsedLat2, err := strconv.ParseFloat(latitude2, 64)
 	if err != nil {
@@ -524,9 +647,7 @@ func didUserTeleport(permissibleSpeed float64, newLoc *string, newT time.Time, o
 
 	_, distance := haversine.Distance(oldCoord, newCoord)
 	timeTaken := newT.Sub(oldT).Hours()
-	if timeTaken < 1.0 {
-		return false, errors.New("time taken too short")
-	}
+
 	speedInKm := distance / timeTaken
 
 	if permissibleSpeed < speedInKm {
