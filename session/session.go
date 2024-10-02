@@ -29,6 +29,30 @@ import (
 
 var ErrIdentityDisabled = herodot.ErrUnauthorized.WithError("identity is disabled").WithReason("This account was disabled.")
 
+// Sentinal error to mark that login lacks necessary information for impossible travel and will be automatically marked as risk high
+type ErrSessionValidation string
+
+func (e ErrSessionValidation) Error() string {
+	return string(e)
+}
+
+const (
+	ErrIpNotSet        = ErrSessionValidation("ip not set")
+	ErrLocationNotSet  = ErrSessionValidation("location not set")
+	ErrUserAgentNotSet = ErrSessionValidation("user agent not set")
+)
+
+// Impossible Travel Risk Levels are used to determine the risk of a session.
+// There are three levels, med serving the purpose of being risky but not worth alerting the user and producing noise and can be used in analysis.
+// High is the highest level of risk and should be used when the session is considered to be compromised.
+type ImpossibleTravelRiskLevel string
+
+const (
+	ImpossibleTravelRiskLevelNone ImpossibleTravelRiskLevel = "none"
+	ImpossibleTravelRiskLevelMed  ImpossibleTravelRiskLevel = "med"
+	ImpossibleTravelRiskLevelHigh ImpossibleTravelRiskLevel = "high"
+)
+
 type lifespanProvider interface {
 	SessionLifespan(ctx context.Context) time.Duration
 }
@@ -150,6 +174,11 @@ type Session struct {
 	// The token of this session.
 	Token string    `json:"-" db:"token"`
 	NID   uuid.UUID `json:"-"  faker:"-" db:"nid"`
+
+	// Impossible Travel Risk Level
+	//
+	//
+	ImpossibleTravelRiskLevel ImpossibleTravelRiskLevel `json:"-"  faker:"-" db:"-"`
 }
 
 func (s Session) PageToken() keysetpagination.PageToken {
@@ -266,17 +295,25 @@ func (s *Session) SetSessionDeviceInformation(r *http.Request) {
 	if len(agent) > 0 {
 		device.UserAgent = pointerx.Ptr(strings.Join(agent, " "))
 	}
-
+	// Oroginally the location was a pure city, region and country, but here I am assuming that the client will be retrievingg the
+	// IP from the browser and send a request to retrieve the GeoLocation based on the IP.
+	// There are many services that provide accurate GeoLocation from IPS like ipinfo.io
+	// I also want to acknowledge that saving the geolcation in headers is not optimmal and should be two fields of their own
+	// latitude and longitude, but for time constraints, I have not updated the schema via migration.
 	var clientGeoLocation []string
-	if r.Header.Get("Cf-Ipcity") != "" {
-		clientGeoLocation = append(clientGeoLocation, r.Header.Get("Cf-Ipcity"))
+	if r.Header.Get("Latitude") != "" {
+		clientGeoLocation = append(clientGeoLocation, r.Header.Get("Latitude"))
 	}
-	if r.Header.Get("Cf-Ipcountry") != "" {
-		clientGeoLocation = append(clientGeoLocation, r.Header.Get("Cf-Ipcountry"))
+	if r.Header.Get("Longitude") != "" {
+		clientGeoLocation = append(clientGeoLocation, r.Header.Get("Longitude"))
 	}
-	device.Location = pointerx.Ptr(strings.Join(clientGeoLocation, ", "))
+	device.Location = pointerx.Ptr(strings.Join(clientGeoLocation, ","))
 
 	s.Devices = append(s.Devices, device)
+}
+
+func (s *Session) SetImpossibleTravelRiskLevel(level ImpossibleTravelRiskLevel) {
+	s.ImpossibleTravelRiskLevel = level
 }
 
 func (s Session) Declassified() *Session {
@@ -302,6 +339,24 @@ func (s *Session) MarshalJSON() ([]byte, error) {
 
 func (s *Session) CanBeRefreshed(ctx context.Context, c refreshWindowProvider) bool {
 	return s.ExpiresAt.Add(-c.SessionRefreshMinTimeLeft(ctx)).Before(time.Now())
+}
+
+func (s *Session) LastRegisteredDevice() Device {
+	return s.Devices[len(s.Devices)-1]
+}
+
+// this function should check for the session's device information, if any is lacked it should be high risk
+func (s *Session) ValidateForImpossibleTravel() error {
+	if s.LastRegisteredDevice().Location == nil || *s.LastRegisteredDevice().Location == "" {
+		return ErrLocationNotSet
+	}
+	if s.LastRegisteredDevice().IPAddress == nil || *s.LastRegisteredDevice().IPAddress == "" {
+		return ErrIpNotSet
+	}
+	if s.LastRegisteredDevice().UserAgent == nil || *s.LastRegisteredDevice().UserAgent == "" {
+		return ErrUserAgentNotSet
+	}
+	return nil
 }
 
 // List of (Used) AuthenticationMethods
