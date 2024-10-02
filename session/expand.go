@@ -43,6 +43,12 @@ var ExpandDefault = Expandables{
 	ExpandSessionIdentity,
 }
 
+// This explandables is for expanding devices necessary for session marking
+// should be also testeed but spared it because of time constraints
+var ExpandDevices = Expandables{
+	ExpandSessionDevices,
+}
+
 // ExpandEverything expands all the fields of a session.
 var ExpandEverything = Expandables{
 	ExpandSessionDevices,
